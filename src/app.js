@@ -12,6 +12,10 @@ const authRoutes = require('./routes/auth.routes');
 const accountRoutes = require('./routes/account.routes')
 const TransactionRoutes =  require('./routes/transaction.routes')
 
+app.get("/", (req, res) => {
+  res.send("Backend API is running 👍");
+});
+
 
 //Routes Using
 app.use("/api/auth", authRoutes);
