@@ -1,0 +1,70 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "LedgerGuard API",
+    "version": "1.0.0",
+    "description": "LedgerGuard financial infrastructure API. Amounts are integer minor units."
+  },
+  "servers": [{ "url": "http://localhost:3000" }],
+  "tags": [
+    { "name": "System" },
+    { "name": "Auth" },
+    { "name": "Accounts" },
+    { "name": "Transfers" },
+    { "name": "Admin" }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer" }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": { "error": { "type": "object", "properties": { "message": { "type": "string" } } } }
+      },
+      "TransferRequest": {
+        "type": "object",
+        "required": ["senderAccountId", "receiverAccountId", "amountMinor", "currency"],
+        "properties": {
+          "senderAccountId": { "type": "string", "format": "uuid" },
+          "receiverAccountId": { "type": "string", "format": "uuid" },
+          "amountMinor": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+          "currency": { "type": "string", "example": "INR" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/health": {
+      "get": { "tags": ["System"], "responses": { "200": { "description": "Process is alive" } } }
+    },
+    "/readyz": {
+      "get": { "tags": ["System"], "responses": { "200": { "description": "Database is reachable" }, "503": { "description": "Dependency unavailable" } } }
+    },
+    "/metrics": {
+      "get": { "tags": ["System"], "responses": { "200": { "description": "In-memory request metrics" } } }
+    },
+    "/auth/register": {
+      "post": { "tags": ["Auth"], "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["name", "email", "password"], "properties": { "name": { "type": "string" }, "email": { "type": "string", "format": "email" }, "password": { "type": "string", "format": "password" } } } } } }, "responses": { "201": { "description": "Registered" }, "409": { "description": "Email exists" } } }
+    },
+    "/auth/login": {
+      "post": { "tags": ["Auth"], "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } }, "responses": { "200": { "description": "Authenticated" }, "401": { "description": "Invalid credentials" } } }
+    },
+    "/accounts": {
+      "post": { "tags": ["Accounts"], "security": [{ "bearerAuth": [] }], "responses": { "201": { "description": "Account created" } } },
+      "get": { "tags": ["Accounts"], "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Owned accounts" } } }
+    },
+    "/transfers": {
+      "post": { "tags": ["Transfers"], "security": [{ "bearerAuth": [] }], "parameters": [{ "name": "Idempotency-Key", "in": "header", "required": true, "schema": { "type": "string" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TransferRequest" } } } }, "responses": { "201": { "description": "Posted transfer" }, "202": { "description": "Held for review" }, "409": { "description": "Business conflict" } } }
+    },
+    "/transfers/{transferId}/reversal": {
+      "post": { "tags": ["Transfers"], "security": [{ "bearerAuth": [] }], "parameters": [{ "name": "transferId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }, { "name": "Idempotency-Key", "in": "header", "required": true, "schema": { "type": "string" } }], "responses": { "201": { "description": "Reversal posted" }, "409": { "description": "Not eligible or duplicate" } } }
+    },
+    "/admin/transfers/flagged": {
+      "get": { "tags": ["Admin"], "security": [{ "bearerAuth": [] }], "responses": { "200": { "description": "Held transfers" }, "403": { "description": "Administrator required" } } }
+    },
+    "/admin/transfers/{transferId}/decision": {
+      "post": { "tags": ["Admin"], "security": [{ "bearerAuth": [] }], "parameters": [{ "name": "transferId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }], "responses": { "200": { "description": "Decision recorded" }, "403": { "description": "Administrator required" } } }
+    }
+  }
+}

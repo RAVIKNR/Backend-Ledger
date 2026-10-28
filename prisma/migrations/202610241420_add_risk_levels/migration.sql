@@ -1,0 +1,6 @@
+ALTER TYPE "TransferStatus" ADD VALUE IF NOT EXISTS 'REVIEW';
+
+CREATE TYPE "RiskLevel" AS ENUM ('LOW', 'MEDIUM', 'HIGH');
+
+ALTER TABLE "risk_assessments"
+ADD COLUMN "level" "RiskLevel" NOT NULL DEFAULT 'LOW';

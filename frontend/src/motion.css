@@ -1,0 +1,61 @@
+.auth-tabs button,
+.nav-item,
+.icon-button,
+.search,
+.workspace-switch,
+.history-row,
+.risk-row,
+.ui-input,
+.profile-logout {
+  transition:
+    color 180ms ease,
+    background-color 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease,
+    transform 180ms cubic-bezier(.22, 1, .36, 1);
+}
+
+.auth-tabs button:hover,
+.nav-item:hover,
+.workspace-switch:hover,
+.history-row:hover,
+.risk-row:hover {
+  transform: translateX(2px);
+}
+
+.icon-button:hover,
+.profile-logout:hover {
+  transform: translateY(-1px);
+}
+
+.ui-input:hover:not(:focus) {
+  border-color: #3b5949;
+}
+
+.skeleton {
+  transition: opacity 180ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-tabs button,
+  .nav-item,
+  .icon-button,
+  .search,
+  .workspace-switch,
+  .history-row,
+  .risk-row,
+  .ui-input,
+  .profile-logout {
+    transition: none;
+  }
+
+  .auth-tabs button:hover,
+  .nav-item:hover,
+  .workspace-switch:hover,
+  .history-row:hover,
+  .risk-row:hover,
+  .icon-button:hover,
+  .profile-logout:hover {
+    transform: none;
+  }
+}

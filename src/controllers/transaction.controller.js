@@ -1,252 +1,381 @@
-const { json } = require('express')
-const accountModel = require('../models/account.model')
-const transactionModel = require('../models/transaction.model')
-const mongoose = require('mongoose')
-const ledgerModel = require('../models/ledger.model')
-const emailServices = require('../services/email.services')
-const UserModel = require('../models/user.model')
+const crypto = require('crypto');
+const { Prisma } = require('@prisma/client');
+const { prisma } = require('../config/db');
+const { assessTransfer } = require('../services/risk.service');
+const { dispatchTransactionNotifications, queueTransferNotifications, queueTransferFailureNotification } = require('../services/transaction-notification.service');
 
-// - Create a new transaction
-// * THE 10-STEP TRANSFER FLOW:
-// * 1. Validate request
-// * 2. Validate idempotency key
-// * 3. Check account status
-// * 4. Derive sender balance from ledger
-// * 5. Create transaction (PENDING)
-// * 6. Create DEBIT ledger entry
-// * 7. Create CREDIT ledger entry
-// * 8. Mark transaction COMPLETED
-// * 9. Commit MongoDB session
-// * 10. Send email notification
+function transferResponse(transfer) {
+    const response = {
+        id: transfer.id,
+        reference: transfer.reference || (transfer.status === 'FAILED' ? null : transfer.id),
+        senderAccountId: transfer.senderAccountId,
+        receiverAccountId: transfer.receiverAccountId,
+        amountMinor: transfer.amountMinor.toString(),
+        currency: transfer.currency.trim(),
+        status: transfer.status,
+        failureReason: transfer.failureReason || null,
+        availableBalanceMinor: transfer.availableBalanceMinor === null || transfer.availableBalanceMinor === undefined
+            ? null
+            : transfer.availableBalanceMinor.toString(),
+        createdAt: transfer.createdAt.toISOString()
+    };
 
-
-
-async function transactionController(req, res) {
-
-    // * 1. Validate request
-
-    const { fromAccount, toAccount, amount, idempotencyKey } = req.body
-
-    if (!fromAccount || !toAccount || !amount || !idempotencyKey) {
-        return res.status(400).json("Please fill the credentials")
-    }
-    
-
-    const fromUserAccount = await accountModel.findOne({
-        _id: fromAccount
-    }).populate("user", "email name");
-
-
-    const toUserAccount = await accountModel.findOne({
-        _id: toAccount
-    }).populate("user", "email name");
-
-    if (!fromUserAccount || !toUserAccount) {
-        return res.status(400).json("invalid fromAccount or toAccounr")
+    if (transfer.riskAssessment) {
+        response.risk = {
+            score: transfer.riskAssessment.score,
+            level: transfer.riskAssessment.level,
+            decision: transfer.riskAssessment.decision,
+            reasons: transfer.riskAssessment.reasons
+        };
     }
 
-    // * 2. Validate idempotency key
-
-    const existingTransaction = await transactionModel.findOne({
-        idempotencyKey: idempotencyKey
-    })
-
-    if (existingTransaction) {
-        if (existingTransaction.status == "pending") {
-            return res.status(400).json({
-                message: "please wait untill the previous transaction being completed"
-            })
-        }
-        if (existingTransaction.status == "completed") {
-            return res.status(500).json({
-                message: "your transaction is already completed"
-            })
-        }
-        if (existingTransaction.status == "failed") {
-            return res.status(500).json({
-                message: "your transaction was failed please retry , again"
-            })
-        }
-        if (existingTransaction.status == "reversed") {
-            return res.status(500).json({
-                message: "your transaction is being reversed , your debited money will come within a moment"
-            })
-        }
-    }
-
-    // * 3. Check account status
-
-    if (fromUserAccount.status !== "active" || toUserAccount.status !== "active") {
-        return res.status(400).json("both accounts must be active")
-    }
-
-    // * 4. Derive sender balance from ledger
-
-    const balance = await fromUserAccount.getBalance();
-
-    if (balance < amount) {
-        return res.status(401).json({
-            message: "Entered amount is more than your current balance"
-        })
-    }
-
-    // * 5. Create transaction (PENDING)
-    let Transaction
-    try {
-
-        const session = await mongoose.startSession()
-        session.startTransaction()
-
-        Transaction = (await transactionModel.create([{
-            toAccount,
-            fromAccount,
-            idempotencyKey,
-            amount,
-            status: "pending"
-        }], { session }))[0]
-
-        await (() => {
-            return new Promise((resolve) => setTimeout(resolve, 15 * 1000));
-        })()
-
-        // * 6. Create DEBIT ledger entry
-
-        const debitLedgerEntry = await ledgerModel.create([{
-            transaction: Transaction._id,
-            account: fromAccount,
-            type: "debit",
-            amount
-        }], { session })
-
-        // * 7. Create CREDIT ledger entry
-        await (() => {
-            return new Promise((resolve) => setTimeout(resolve, 15 * 1000));
-        })()
-
-        const creditLedgerEntry = await ledgerModel.create([{
-            transaction: Transaction._id,
-            account: toAccount,
-            type: "credit",
-            amount
-        }], { session })
-
-        // * 8. Mark transaction COMPLETED
-
-        await transactionModel.findOneAndUpdate(
-            { _id: Transaction._id },
-            { status: "completed" },
-            { session }
-        )
-
-        await session.commitTransaction()
-        session.endSession()
-
-    }
-    catch (error) {
-
-        return res.status(400).json({
-            message: "Transaction is Pending due to some issue, please retry after sometime", error,
-        })
-    }
-    res.status(200).json({
-        message: "Transaction successful",
-        Transaction
-    })
-
-
-    await emailServices.debittransactionMail({
-        email:fromUserAccount.user.email,
-        amount,
-        type: "debit", // or CREDIT
-        balance,
-        toAccount
-    });
-    await emailServices.creditTransactionMail({
-        email:toUserAccount.user.email,
-        amount,
-        type: "credit", // or CREDIT
-        balance,
-        fromAccount
-    });
-
-
+    return response;
 }
 
-  
+function getTransferInput(body) {
+    return {
+        senderAccountId: body.senderAccountId || body.fromAccount,
+        receiverAccountId: body.receiverAccountId || body.toAccount,
+        amountMinor: body.amountMinor,
+        currency: typeof body.currency === 'string' ? body.currency.trim().toUpperCase() : undefined,
+    };
+}
 
-    async function createInitialFunding(req, res) {
+function isUuid(value) {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
 
-        const { toAccount, amount, idempotencyKey } = req.body
+async function transactionController(req, res) {
+    const input = getTransferInput(req.body);
+    const idempotencyKey = req.get('Idempotency-Key');
 
-        if (!amount || !toAccount || !idempotencyKey) {
-            return res.status(400).json({
-                message: "Please fill the credentials first"
-            })
-        }
-
-        const toUserAccount = await accountModel.findOne({
-            _id: toAccount
-        }).populate("user","email name")
-
-        if (!toUserAccount) {
-            return res.status(400).json({
-                message: "Account did not exist"
-            }).populate("user","email name")
-        }
-
-        const fromUserAccount = await accountModel.findOne({
-            user: req.user._id
-        })
-
-        
-        if (!fromUserAccount) {
-            return res.status(403).json({
-                message: "You are not allowed to do this kind of stuff"
-            })
-        }
-
-
-        const session = await mongoose.startSession()
-        session.startTransaction()
-
-        const transaction = new transactionModel({
-            fromAccount: fromUserAccount._id,
-            toAccount,
-            status: "pending",
-            amount,
-            idempotencyKey: idempotencyKey
-        })
-
-        const debitLedgerEntry = await ledgerModel.create([{
-            account: fromUserAccount._id,
-            amount,
-            transaction: transaction._id,
-            type: "debit"
-
-        }], { session })
-        const creditLedgerEntry = await ledgerModel.create([{
-            account: toAccount,
-            amount,
-            transaction: transaction._id,
-            type: "credit"
-
-        }], { session })
-
-        transaction.status = "completed"
-
-        await transaction.save({ session })
-        await session.commitTransaction()
-        session.endSession()
-
-   res.status(200).json({
-            message: "Payment successful",
-            transaction
-        })
-
-        await emailServices.initiatefunding(toUserAccount.user.name, amount,toAccount, toUserAccount.user.email, transaction._id)
-
+    if (!input.senderAccountId) {
+        return res.status(400).json({ error: { code: 'SOURCE_ACCOUNT_REQUIRED', message: 'An active INR source account is required to start a transfer' } });
+    }
+    if (!input.receiverAccountId || !input.amountMinor || !input.currency || !idempotencyKey) {
+        return res.status(400).json({ error: { message: 'senderAccountId, receiverAccountId, amountMinor, currency, and Idempotency-Key are required' } });
+    }
+    if (input.currency !== 'INR') {
+        return res.status(400).json({ error: { message: 'Only INR transfers are supported' } });
     }
 
+    if (input.senderAccountId === input.receiverAccountId) {
+        return res.status(400).json({ error: { message: 'Sender and receiver accounts must be different' } });
+    }
 
+    let amountMinor;
+    try {
+        amountMinor = BigInt(input.amountMinor);
+    } catch {
+        return res.status(400).json({ error: { message: 'amountMinor must be a positive integer' } });
+    }
+    if (amountMinor <= 0n) {
+        return res.status(400).json({ error: { message: 'amountMinor must be a positive integer' } });
+    }
 
-    module.exports = { transactionController, createInitialFunding }
+    const requestHash = crypto
+        .createHash('sha256')
+        .update(JSON.stringify({
+            senderAccountId: input.senderAccountId,
+            receiverAccountId: input.receiverAccountId,
+            amountMinor: amountMinor.toString(),
+            currency: input.currency
+        }))
+        .digest('hex');
+
+    try {
+        const result = await prisma.$transaction(async (tx) => {
+            const existingKey = await tx.idempotencyKey.findUnique({
+                where: {
+                    userId_key: { userId: req.user.id, key: idempotencyKey }
+                },
+                include: { transfer: { include: { riskAssessment: true } } }
+            });
+
+            if (existingKey) {
+                if (existingKey.requestHash !== requestHash) {
+                    const error = new Error('Idempotency key was already used for a different request');
+                    error.statusCode = 409;
+                    throw error;
+                }
+
+                return {
+                    transfer: existingKey.transfer,
+                    replayed: true
+                };
+            }
+
+            let receiverAccountId = input.receiverAccountId;
+            if (!isUuid(receiverAccountId)) {
+                const recipient = await tx.account.findUnique({
+                    where: { accountNumber: receiverAccountId }
+                });
+                if (!recipient) {
+                    const error = new Error('Recipient account was not found');
+                    error.statusCode = 404;
+                    throw error;
+                }
+                receiverAccountId = recipient.id;
+            }
+
+            const firstId = input.senderAccountId < receiverAccountId
+                ? input.senderAccountId
+                : receiverAccountId;
+            const secondId = firstId === input.senderAccountId
+                ? receiverAccountId
+                : input.senderAccountId;
+
+            await tx.$queryRaw`
+                SELECT id
+                FROM "accounts"
+                WHERE id IN (${firstId}::uuid, ${secondId}::uuid)
+                ORDER BY id
+                FOR UPDATE
+            `;
+
+            const accounts = await tx.account.findMany({
+                where: { id: { in: [input.senderAccountId, receiverAccountId] } },
+                include: { user: { select: { id: true, name: true, email: true, emailVerifiedAt: true } } }
+            });
+            const sender = accounts.find((account) => account.id === input.senderAccountId);
+            const receiver = accounts.find((account) => account.id === receiverAccountId);
+
+            if (!sender || !receiver) {
+                const error = new Error('Sender or receiver account was not found');
+                error.statusCode = 404;
+                throw error;
+            }
+
+            if (sender.userId !== req.user.id) {
+                const error = new Error('You do not own the sender account');
+                error.statusCode = 403;
+                throw error;
+            }
+
+            const rejectTransfer = async (reason, code = 'TRANSFER_REJECTED', availableBalanceMinor = null) => {
+                const failedTransfer = await tx.transfer.create({
+                    data: {
+                        senderAccountId: sender.id,
+                        receiverAccountId: receiver.id,
+                        amountMinor,
+                        currency: input.currency,
+                        status: 'FAILED',
+                        failureReason: reason,
+                        availableBalanceMinor
+                    },
+                    include: { senderAccount: { include: { user: true } }, receiverAccount: true }
+                });
+                await tx.idempotencyKey.create({
+                    data: {
+                        userId: req.user.id,
+                        accountId: sender.id,
+                        transferId: failedTransfer.id,
+                        key: idempotencyKey,
+                        requestHash,
+                        responseStatus: 409,
+                        responseBody: transferResponse(failedTransfer)
+                    }
+                });
+                await queueTransferFailureNotification(tx, failedTransfer);
+                return {
+                    transfer: failedTransfer,
+                    replayed: false,
+                    statusCode: 409,
+                    failure: {
+                        code,
+                        message: reason,
+                        details: {
+                            ...(availableBalanceMinor === null ? {} : { availableBalanceMinor: availableBalanceMinor.toString() }),
+                            requiredAmountMinor: amountMinor.toString(),
+                            currency: input.currency
+                        }
+                    }
+                };
+            };
+
+            const senderUser = await tx.user.findUnique({
+                where: { id: sender.userId },
+                select: {
+                    name: true, addressLine: true, city: true, region: true, postalCode: true, country: true,
+                    email: true, emailOtpChallenge: { select: { email: true, status: true, verifiedAt: true } }
+                }
+            });
+            const profileComplete = senderUser && [
+                senderUser.name, senderUser.addressLine, senderUser.city,
+                senderUser.region, senderUser.postalCode, senderUser.country
+            ].every(value => typeof value === 'string' && value.trim().length > 0);
+            if (!profileComplete) {
+                return rejectTransfer('Complete your banking profile before starting a transfer', 'PROFILE_INCOMPLETE');
+            }
+            if (
+                !senderUser.emailOtpChallenge ||
+                senderUser.emailOtpChallenge.email !== senderUser.email ||
+                senderUser.emailOtpChallenge.status !== 'VERIFIED' ||
+                !senderUser.emailOtpChallenge.verifiedAt
+            ) {
+                return rejectTransfer('Verify your email before starting a transfer', 'EMAIL_VERIFICATION_REQUIRED');
+            }
+
+            if (sender.status !== 'ACTIVE' || receiver.status !== 'ACTIVE') {
+                return rejectTransfer('Both accounts must be active');
+            }
+
+            if (sender.currency.trim() !== input.currency || receiver.currency.trim() !== input.currency) {
+                return rejectTransfer('Transfer currency must match both account currencies', 'CURRENCY_MISMATCH');
+            }
+
+            const balanceRows = await tx.$queryRaw`
+                SELECT COALESCE(SUM(
+                    CASE WHEN entry_type = 'CREDIT' THEN amount_minor ELSE -amount_minor END
+                ), 0)::bigint AS balance
+                FROM "ledger_entries"
+                WHERE account_id = ${input.senderAccountId}::uuid
+            `;
+            const balanceMinor = BigInt(balanceRows[0].balance);
+
+            if (balanceMinor < amountMinor) {
+                return rejectTransfer('Insufficient Funds', 'INSUFFICIENT_FUNDS', balanceMinor);
+            }
+
+            const transfer = await tx.transfer.create({
+                data: {
+                    senderAccountId: sender.id,
+                    receiverAccountId: receiver.id,
+                    amountMinor,
+                    currency: input.currency,
+                    status: 'PENDING'
+                }
+            });
+
+            const risk = await assessTransfer(tx, {
+                senderAccountId: sender.id,
+                receiverAccountId: receiver.id,
+                amountMinor,
+                currency: input.currency
+            });
+            await tx.riskAssessment.create({
+                data: {
+                    transferId: transfer.id,
+                    score: risk.score,
+                    level: risk.level,
+                    decision: risk.decision,
+                    reasons: risk.reasons
+                }
+            });
+
+            if (risk.level === 'HIGH') {
+                const heldTransfer = await tx.transfer.update({
+                    where: { id: transfer.id },
+                    data: { status: 'REVIEW' },
+                    include: { riskAssessment: true }
+                });
+                const response = transferResponse(heldTransfer);
+                await tx.idempotencyKey.create({
+                    data: {
+                        userId: req.user.id,
+                        accountId: sender.id,
+                        transferId: transfer.id,
+                        key: idempotencyKey,
+                        requestHash,
+                        responseStatus: 202,
+                        responseBody: response
+                    }
+                });
+                return { transfer: heldTransfer, replayed: false, statusCode: 202 };
+            }
+
+            await tx.ledgerEntry.createMany({
+                data: [
+                    { transferId: transfer.id, accountId: sender.id, entryType: 'DEBIT', amountMinor, currency: input.currency },
+                    { transferId: transfer.id, accountId: receiver.id, entryType: 'CREDIT', amountMinor, currency: input.currency }
+                ]
+            });
+            const completedTransfer = await tx.transfer.update({
+                where: { id: transfer.id },
+                data: { status: 'COMPLETED' },
+                include: {
+                    riskAssessment: true,
+                    senderAccount: { include: { user: { select: { id: true, email: true, name: true } } } },
+                    receiverAccount: { include: { user: { select: { id: true, email: true, name: true } } } }
+                }
+            });
+            await queueTransferNotifications(tx, completedTransfer);
+
+            const response = transferResponse(completedTransfer);
+            await tx.idempotencyKey.create({
+                data: {
+                    userId: req.user.id,
+                    accountId: sender.id,
+                    transferId: completedTransfer.id,
+                    key: idempotencyKey,
+                    requestHash,
+                    responseStatus: 201,
+                    responseBody: response
+                }
+            });
+
+            return { transfer: completedTransfer, replayed: false, statusCode: 201 };
+        }, {
+            isolationLevel: Prisma.TransactionIsolationLevel.Serializable
+        });
+
+        if (result.failure) {
+            res.status(result.replayed ? 200 : result.statusCode).json({
+                error: result.failure,
+                transfer: transferResponse(result.transfer),
+                replayed: result.replayed
+            });
+            if (!result.replayed) void dispatchTransactionNotifications(result.transfer.id);
+            return;
+        }
+        res.status(result.replayed ? 200 : result.statusCode).json({
+            transfer: transferResponse(result.transfer),
+            replayed: result.replayed
+        });
+        if (result.transfer.status === 'COMPLETED') {
+            void dispatchTransactionNotifications(result.transfer.id);
+        }
+    } catch (error) {
+        if (error.code === 'P2002') {
+            const existingKey = await prisma.idempotencyKey.findUnique({
+                where: {
+                    userId_key: { userId: req.user.id, key: idempotencyKey }
+                },
+                include: { transfer: { include: { riskAssessment: true } } }
+            });
+
+            if (existingKey && existingKey.requestHash === requestHash && existingKey.transfer) {
+                return res.status(existingKey.responseStatus || 200).json({
+                    transfer: transferResponse(existingKey.transfer),
+                    replayed: true
+                });
+            }
+
+            return res.status(409).json({
+                error: { message: 'Idempotency key is already in use for a different request' }
+            });
+        }
+        throw error;
+    }
+}
+
+async function getTransferStatus(req, res) {
+    const idempotencyKey = req.get('Idempotency-Key');
+    const existingKey = await prisma.idempotencyKey.findUnique({
+        where: {
+            userId_key: { userId: req.user.id, key: idempotencyKey }
+        },
+        include: { transfer: { include: { riskAssessment: true } } }
+    });
+
+    if (!existingKey?.transfer) {
+        return res.status(404).json({ error: { message: 'No transfer is recorded for this request key' } });
+    }
+
+    return res.json({
+        transfer: transferResponse(existingKey.transfer),
+        replayed: true
+    });
+}
+
+module.exports = { transactionController, getTransferStatus };

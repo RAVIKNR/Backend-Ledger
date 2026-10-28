@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: ledgerguard_test
+          POSTGRES_USER: ledgerguard
+          POSTGRES_PASSWORD: ledgerguard
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ledgerguard -d ledgerguard"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://ledgerguard:ledgerguard@localhost:5432/ledgerguard_test?schema=public
+      JWT_SECRET: ci-only-secret
+      ADMIN_USER_ID: 00000000-0000-0000-0000-000000000001
+      RUN_DB_TESTS: "1"
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx prisma validate
+      - run: npx prisma generate
+      - run: npx prisma migrate deploy
+      - run: npm test

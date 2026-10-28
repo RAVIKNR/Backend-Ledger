@@ -1,0 +1,7 @@
+ALTER TABLE "users"
+ADD COLUMN "phone" VARCHAR(16),
+ADD COLUMN "address_line" VARCHAR(240),
+ADD COLUMN "city" VARCHAR(100),
+ADD COLUMN "region" VARCHAR(100),
+ADD COLUMN "postal_code" VARCHAR(20),
+ADD COLUMN "country" CHAR(2);

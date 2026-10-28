@@ -1,9 +1,48 @@
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '../../.env') });
 const nodemailer = require('nodemailer');
 const crypto = require("crypto");
+const { renderLedgerGuardEmail, renderTransactionEmail, renderFailedTransactionEmail, renderSecurityNotificationEmail, renderAccountEventEmail } = require('./ledgerguard-email.template');
+const { getFrontendUrl } = require('../config/frontend-url');
+
+const smtpHost = process.env.EMAIL_HOST || 'smtp.gmail.com';
+const smtpPort = Number(process.env.EMAIL_PORT) || 465;
+const smtpSecure = process.env.EMAIL_SECURE
+  ? process.env.EMAIL_SECURE === 'true'
+  : smtpPort === 465;
+const smtpRequireTls = process.env.EMAIL_REQUIRE_TLS === 'true';
+
+function smtpErrorDetails(error) {
+  return {
+    code: error?.code || null,
+    command: error?.command || null,
+    responseCode: error?.responseCode || null
+  };
+}
+
+if (process.env.NODE_ENV !== 'test') {
+  console.log('[email] SMTP configuration', {
+    host: smtpHost,
+    port: smtpPort,
+    secure: smtpSecure,
+    requireTLS: smtpRequireTls,
+    credentialsPresent: {
+      EMAIL_USER: Boolean(process.env.EMAIL_USER),
+      CLIENT_ID: Boolean(process.env.CLIENT_ID),
+      CLIENT_SECRET: Boolean(process.env.CLIENT_SECRET),
+      REFRESH_TOKEN: Boolean(process.env.REFRESH_TOKEN),
+    },
+  });
+}
 
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: smtpHost,
+  port: smtpPort,
+  secure: smtpSecure,
+  requireTLS: smtpRequireTls,
+  connectionTimeout: 15000,
+  greetingTimeout: 15000,
+  socketTimeout: 20000,
   auth: {
     type: 'OAuth2',
     user: process.env.EMAIL_USER,
@@ -13,33 +52,106 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+
+
 // Verify the connection configuration
 
 
-transporter.verify((error, success) => {
-  if (error) {
-    console.error('Error connecting to email server:', error);
-  } else {
-    console.log('Email server is ready to send messages');
-  }
-});
+
+if (process.env.NODE_ENV !== 'test' && process.env.EMAIL_USER) {
+  transporter.verify((error) => {
+    if (error) {
+      console.error('[email] SMTP verification failed', smtpErrorDetails(error));
+    } else {
+      console.log('Email server is ready to send messages');
+    }
+  });
+}
 
 const sendEmail = async (to, subject, text, html) => {
-  try {
-    const info = await transporter.sendMail({
-      from: `"Backend Ledger" <${process.env.EMAIL_USER}>`, // sender address
-      to, // list of receivers
-      subject, // Subject line
-      text, // plain text body
-      html, // html body
-    });
-
-    console.log('Message sent: %s', info.messageId);
-    console.log('Preview URL: %s', nodemailer.getTestMessageUrl(info));
-  } catch (error) {
-    console.error('Error sending email:', error);
-  }
+  await transporter.sendMail({
+    from: `"LedgerGuard" <${process.env.EMAIL_USER}>`,
+    to,
+    subject,
+    text,
+    html,
+  });
 };
+
+async function sendTransactionEmail({ email, name, type, amountMinor, currency, reference, occurredAt }) {
+  const amount = new Intl.NumberFormat('en-IN', {
+    style: 'currency',
+    currency: currency.trim()
+  }).format(Number(amountMinor) / 100);
+  const message = renderTransactionEmail({
+    recipientName: name,
+    type,
+    amount,
+    currency: currency.trim(),
+    reference,
+    occurredAt
+  });
+  await sendEmail(email, `${amount} ${type === 'DEBIT' ? 'debited' : 'credited'} | LedgerGuard`, message.text, message.html);
+}
+
+async function sendFailedTransactionEmail({ email, name, amountMinor, currency, reason, sourceAccount, recipientAccount, reference, occurredAt }) {
+  const amount = new Intl.NumberFormat('en-IN', { style: 'currency', currency: currency.trim() }).format(Number(amountMinor) / 100);
+  const message = renderFailedTransactionEmail({ recipientName: name, amount, currency: currency.trim(), reason, sourceAccount, recipientAccount, reference, occurredAt });
+  await sendEmail(email, message.subject, message.text, message.html);
+}
+
+async function sendSecurityNotificationEmail(notification) {
+  const message = renderSecurityNotificationEmail({
+    recipientName: notification.recipientName,
+    eventType: notification.eventType,
+    accountIdentifier: notification.accountId ? `acct-****-${notification.accountId.slice(-4)}` : null,
+    previousStatus: notification.previousStatus,
+    resultingStatus: notification.resultingStatus,
+    reason: notification.reason,
+    occurredAt: notification.occurredAt
+  });
+  await sendEmail(notification.recipientEmail, `${message.subject} | LedgerGuard`, message.text, message.html);
+}
+
+async function sendRegistrationConfirmationEmail({ email, name, occurredAt = new Date() }) {
+  const message = renderAccountEventEmail({
+    recipientName: name,
+    title: 'Your LedgerGuard registration is complete',
+    intro: 'Your email has been verified and your LedgerGuard registration was successfully completed.',
+    message: 'You can now sign in and continue to your secure financial workspace.',
+    occurredAt,
+    actionLabel: 'Continue to LedgerGuard',
+    actionUrl: getFrontendUrl()
+  });
+  await sendEmail(email, 'Your LedgerGuard registration is complete', message.text, message.html);
+}
+
+async function sendLoginConfirmationEmail({ email, name, occurredAt = new Date() }) {
+  const message = renderAccountEventEmail({
+    recipientName: name,
+    title: 'New LedgerGuard sign-in',
+    intro: 'A successful sign-in to your LedgerGuard account was recorded.',
+    message: 'If you do not recognize this activity, review your account security settings.',
+    occurredAt,
+    actionLabel: 'Review security settings',
+    actionUrl: `${getFrontendUrl()}/settings`
+  });
+  await sendEmail(email, 'Successful LedgerGuard sign-in', message.text, message.html);
+}
+
+async function sendAccountCreatedEmail({ email, name, accountId, occurredAt = new Date() }) {
+  const maskedAccount = accountId ? `...${String(accountId).slice(-4)}` : 'your INR account';
+  const message = renderAccountEventEmail({
+    recipientName: name,
+    title: 'Your INR account is ready',
+    intro: 'Your LedgerGuard INR financial account was successfully created.',
+    message: `Account reference: ${maskedAccount}. Your balance and account activity are available in LedgerGuard.`,
+    occurredAt,
+    actionLabel: 'Open LedgerGuard',
+    actionUrl: `${getFrontendUrl()}/accounts`
+  });
+  await sendEmail(email, 'Your LedgerGuard INR account is ready', message.text, message.html);
+}
 
 async function RegistrationEmail(useremail, name) {
 
@@ -705,4 +817,72 @@ async function initiatefunding(
 
 
 
-module.exports = {RegistrationEmail, loginDetected ,debittransactionMail,creditTransactionMail, accountCreated , initiatefunding};
+async function sendVerificationEmail(email, name, token) {
+ const verificationUrl = new URL('/verify-email', getFrontendUrl());
+ verificationUrl.searchParams.set('token', token);
+ const subject = 'Verify your LedgerGuard email';
+ const message = renderLedgerGuardEmail({
+   recipientName: name,
+   title: 'Verify your LedgerGuard email',
+   intro: 'Confirm your email address to activate sign-in.',
+   message: 'This one-time verification link is unique to your account.',
+   actionLabel: 'Verify email address',
+   actionUrl: verificationUrl.toString(),
+   expiry: '24 hours'
+ });
+
+ if (process.env.RESEND_API_KEY) {
+   const response = await fetch('https://api.resend.com/emails', {
+     method: 'POST',
+     headers: {
+       Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+       'Content-Type': 'application/json'
+     },
+     body: JSON.stringify({
+       from: process.env.RESEND_FROM_EMAIL || 'LedgerGuard <onboarding@resend.dev>',
+       to: [email],
+       subject,
+       text: message.text,
+       html: message.html
+     })
+   });
+   if (!response.ok) {
+     console.error('[email] Resend verification email failed', { status: response.status });
+     throw new Error('Resend rejected the verification email');
+   }
+   return;
+ }
+
+ if (!process.env.EMAIL_USER || !process.env.CLIENT_ID || !process.env.CLIENT_SECRET || !process.env.REFRESH_TOKEN) {
+   throw new Error('Email service is not configured');
+ }
+
+ try {
+   await transporter.sendMail({
+     from: `"LedgerGuard" <${process.env.EMAIL_USER}>`,
+     to: email,
+     subject,
+    text: message.text,
+    html: message.html
+   });
+ } catch (error) {
+   console.error('[email] Verification email send failed', smtpErrorDetails(error));
+   throw error;
+ }
+}
+
+module.exports = {
+  RegistrationEmail: (email, name) => sendRegistrationConfirmationEmail({ email, name }),
+  loginDetected: (email, name) => sendLoginConfirmationEmail({ email, name }),
+  debittransactionMail,
+  creditTransactionMail,
+  accountCreated: (email, name, accountId) => sendAccountCreatedEmail({ email, name, accountId }),
+  initiatefunding,
+  sendVerificationEmail,
+  sendTransactionEmail,
+  sendFailedTransactionEmail,
+  sendSecurityNotificationEmail,
+  sendRegistrationConfirmationEmail,
+  sendLoginConfirmationEmail,
+  sendAccountCreatedEmail
+};

@@ -1,79 +1,66 @@
-const userModel = require('../models/user.model');
 const jwt = require('jsonwebtoken');
-const blackListModel = require('../models/blacklist.model')
-const blackListedToken = require('../controllers/auth.controller')
+const { prisma } = require('../config/db');
 
+const authenticatedUserSelect = {
+    id: true,
+    name: true,
+    email: true,
+    status: true,
+    createdAt: true,
+    updatedAt: true,
+    phone: true,
+    addressLine: true,
+    city: true,
+    region: true,
+    postalCode: true,
+    country: true,
+    isAdmin: true
+};
 
-async function Accountmiddleware(req, res, next) {
+function getToken(req) {
+    const authorization = req.get('authorization');
 
-   const token = req.cookies.token
-
-    if(!token){
-        return res.status(401).json({message: 'Unauthorized Token not found'})
+    if (authorization && authorization.startsWith('Bearer ')) {
+        return authorization.slice(7);
     }
 
-    const isBlacklisted = await blackListModel.findOne({
-        token
-    })
-    
-    if(isBlacklisted){
-        return res.status(400).json({
-            message:"Unauthorized access, token is invalid"
-        })
-    }
-    
-    try{
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        
-        const user = await userModel.findById(decoded.id);
-      
-        req.user = user;
-       return next();
-
-    }
-    catch(err){
-        return res.status(401).json({message: 'Unauthorized Invalid token'})
-    }
-    
+    return req.cookies.token;
 }
 
-async function systemUserMiddleware(req,res,next){
+async function authenticate(req, res, next) {
+    const token = getToken(req);
 
-    const token = req.cookies.token
-
-    if(!token){
-       return res.status(400).json({
-            message:"token not present"
-        })
+    if (!token) {
+        return res.status(401).json({ error: { message: 'Authentication required' } });
     }
 
-       const isBlacklisted = await blackListModel.findOne({ token })
-
-    if (isBlacklisted) {
-        return res.status(401).json({
-            message: "Unauthorized access, token is invalid"
-        })
+    let decoded;
+    try {
+        decoded = jwt.verify(token, process.env.JWT_SECRET);
+    } catch (error) {
+        return res.status(401).json({ error: { message: 'Invalid or expired token' } });
     }
 
-   try{
-    const decoded = jwt.verify(token,process.env.JWT_SECRET)
-         
-    const user = await userModel.findById(decoded.id).select("+systemUser")
-    if(!user.systemUser){
-        return res.status(400).json({
-            message:"user did not found"
-        })
+    let user;
+    try {
+        user = await prisma.user.findUnique({
+            where: { id: decoded.sub },
+            select: authenticatedUserSelect
+        });
+    } catch (error) {
+        return next(error);
     }
-    req.user = user
-    next()
-   }
-   catch(error){
-    return res.status(400).json({
-        message:"Invalid token"
-    })
-   }
+
+    if (!user || user.status !== 'ACTIVE') {
+        return res.status(401).json({ error: { message: 'User is not active' } });
+    }
+
+    req.user = user;
+    next();
 }
 
-
-
-module.exports = {Accountmiddleware , systemUserMiddleware};
+module.exports = {
+    authenticate,
+    Accountmiddleware: authenticate,
+    systemUserMiddleware: authenticate
+};

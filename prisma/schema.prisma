@@ -1,0 +1,310 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+model TransactionNotification {
+  id               String    @id @default(uuid()) @db.Uuid
+  transferId       String    @map("transfer_id") @db.Uuid
+  recipientUserId  String    @map("recipient_user_id") @db.Uuid
+  recipientEmail   String    @map("recipient_email") @db.VarChar(320)
+  recipientName    String    @map("recipient_name") @db.VarChar(120)
+  notificationType String    @map("notification_type") @db.VarChar(16)
+  amountMinor      BigInt    @map("amount_minor") @db.BigInt
+  currency         String    @db.Char(3)
+  reference        String?   @db.VarChar(255)
+  occurredAt       DateTime  @map("occurred_at")
+  status           String    @default("PENDING") @db.VarChar(16)
+  attempts         Int       @default(0)
+  lastError        String?   @map("last_error") @db.VarChar(255)
+  sentAt           DateTime? @map("sent_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+  transfer         Transfer  @relation(fields: [transferId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  recipient        User      @relation("NotificationRecipient", fields: [recipientUserId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([transferId, notificationType])
+  @@index([status, createdAt])
+  @@map("transaction_notifications")
+}
+
+model SecurityNotification {
+  id              String    @id @default(uuid()) @db.Uuid
+  userId          String    @map("user_id") @db.Uuid
+  accountId       String?   @map("account_id") @db.Uuid
+  eventType       String    @map("event_type") @db.VarChar(32)
+  previousStatus  String    @map("previous_status") @db.VarChar(16)
+  resultingStatus String    @map("resulting_status") @db.VarChar(16)
+  reason          String?   @db.VarChar(255)
+  occurredAt      DateTime  @map("occurred_at")
+  status          String    @default("PENDING") @db.VarChar(16)
+  attempts        Int       @default(0)
+  lastError       String?   @map("last_error") @db.VarChar(255)
+  sentAt          DateTime? @map("sent_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  user            User      @relation("SecurityNotificationRecipient", fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  account         Account?  @relation(fields: [accountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([status, createdAt])
+  @@index([userId, createdAt])
+  @@map("security_notifications")
+}
+
+model Reversal {
+  id                 String   @id @default(uuid()) @db.Uuid
+  originalTransferId String   @unique @map("original_transfer_id") @db.Uuid
+  reversalTransferId String   @unique @map("reversal_transfer_id") @db.Uuid
+  requestedByUserId  String   @map("requested_by_user_id") @db.Uuid
+  idempotencyKey     String   @map("idempotency_key") @db.VarChar(255)
+  createdAt          DateTime @default(now()) @map("created_at")
+  originalTransfer   Transfer @relation("OriginalTransfer", fields: [originalTransferId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reversalTransfer   Transfer @relation("ReversalTransfer", fields: [reversalTransferId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  requestedBy        User     @relation(fields: [requestedByUserId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([requestedByUserId, idempotencyKey])
+  @@index([createdAt])
+  @@map("reversals")
+}
+
+model AdminDecision {
+  id          String   @id @default(uuid()) @db.Uuid
+  transferId  String   @map("transfer_id") @db.Uuid
+  adminUserId String   @map("admin_user_id") @db.Uuid
+  decision    String   @db.VarChar(32)
+  notes       String?  @db.VarChar(1000)
+  createdAt   DateTime @default(now()) @map("created_at")
+  transfer    Transfer @relation(fields: [transferId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  adminUser   User     @relation(fields: [adminUserId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([transferId, createdAt])
+  @@index([decision, createdAt])
+  @@map("admin_decisions")
+}
+
+model AdminAuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  actorId    String   @map("actor_id") @db.Uuid
+  action     String   @db.VarChar(80)
+  targetType String   @map("target_type") @db.VarChar(40)
+  targetId   String   @map("target_id") @db.VarChar(255)
+  reason     String?  @db.VarChar(1000)
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+  actor      User     @relation("AdminAuditActor", fields: [actorId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([createdAt])
+  @@index([actorId, createdAt])
+  @@index([targetType, targetId, createdAt])
+  @@index([action, createdAt])
+  @@map("admin_audit_logs")
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  CLOSED
+}
+
+enum AccountStatus {
+  ACTIVE
+  FROZEN
+  CLOSED
+}
+
+enum TransferStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  REVIEW
+  FAILED
+  REVERSED
+}
+
+enum LedgerEntryType {
+  DEBIT
+  CREDIT
+}
+
+enum RiskDecision {
+  PENDING
+  APPROVED
+  REVIEW
+  DECLINED
+}
+
+enum RiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+model User {
+  id                              String                    @id @default(uuid()) @db.Uuid
+  email                           String                    @unique @db.VarChar(320)
+  name                            String                    @db.VarChar(120)
+  phone                           String?                   @map("phone") @db.VarChar(16)
+  addressLine                     String?                   @map("address_line") @db.VarChar(240)
+  city                            String?                   @db.VarChar(100)
+  region                          String?                   @db.VarChar(100)
+  postalCode                      String?                   @map("postal_code") @db.VarChar(20)
+  country                         String?                   @db.Char(2)
+  passwordHash                    String?                   @map("password_hash") @db.VarChar(255)
+  googleSubject                   String?                   @unique @map("google_subject") @db.VarChar(255)
+  emailVerifiedAt                 DateTime?                 @map("email_verified_at")
+  emailVerificationTokenHash      String?                   @unique @map("email_verification_token_hash") @db.VarChar(64)
+  emailVerificationTokenExpiresAt DateTime?                 @map("email_verification_token_expires_at")
+  emailVerificationSentAt         DateTime?                 @map("email_verification_sent_at")
+  status                          UserStatus                @default(ACTIVE)
+  isAdmin                         Boolean                   @default(false) @map("is_admin")
+  createdAt                       DateTime                  @default(now()) @map("created_at")
+  updatedAt                       DateTime                  @updatedAt @map("updated_at")
+  accounts                        Account[]
+  idempotencyKeys                 IdempotencyKey[]
+  requestedReversals              Reversal[]
+  adminDecisions                  AdminDecision[]
+  adminAuditEvents                AdminAuditLog[]           @relation("AdminAuditActor")
+  emailOtpChallenge               EmailOtpChallenge?
+  transactionNotifications        TransactionNotification[] @relation("NotificationRecipient")
+  securityNotifications           SecurityNotification[] @relation("SecurityNotificationRecipient")
+
+  @@map("users")
+}
+
+model EmailOtpChallenge {
+  id                   String     @id @default(uuid()) @db.Uuid
+  userId               String     @unique @map("user_id") @db.Uuid
+  email                String     @db.VarChar(320)
+  otpHash              String?    @map("otp_hash") @db.VarChar(64)
+  status               String     @default("SENDING") @db.VarChar(24)
+  windowStartedAt      DateTime   @map("window_started_at")
+  sendsInWindow        Int        @default(1) @map("sends_in_window")
+  sendHistory          DateTime[] @default([]) @map("send_history")
+  sentAt               DateTime?  @map("sent_at")
+  expiresAt            DateTime   @map("expires_at")
+  resendAfterAt        DateTime   @map("resend_after_at")
+  verificationAttempts Int        @default(0) @map("verification_attempts")
+  verifiedAt           DateTime?  @map("verified_at")
+  createdAt            DateTime   @default(now()) @map("created_at")
+  updatedAt            DateTime   @updatedAt @map("updated_at")
+  user                 User       @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([status, expiresAt])
+  @@index([email, windowStartedAt])
+  @@map("email_otp_challenges")
+}
+
+model Account {
+  id                String           @id @default(uuid()) @db.Uuid
+  accountNumber     String           @unique @default(uuid()) @map("account_number") @db.VarChar(64)
+  userId            String           @map("user_id") @db.Uuid
+  currency          String           @db.Char(3)
+  status            AccountStatus    @default(ACTIVE)
+  createdAt         DateTime         @default(now()) @map("created_at")
+  updatedAt         DateTime         @updatedAt @map("updated_at")
+  user              User             @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  sentTransfers     Transfer[]       @relation("senderAccount")
+  receivedTransfers Transfer[]       @relation("receiverAccount")
+  ledgerEntries     LedgerEntry[]
+  securityNotifications SecurityNotification[]
+  idempotencyKeys   IdempotencyKey[]
+
+  @@unique([userId, currency])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Transfer {
+  id                String                    @id @default(uuid()) @db.Uuid
+  senderAccountId   String?                   @map("sender_account_id") @db.Uuid
+  receiverAccountId String                    @map("receiver_account_id") @db.Uuid
+  amountMinor       BigInt                    @map("amount_minor") @db.BigInt
+  currency          String                    @db.Char(3)
+  status            TransferStatus            @default(PENDING)
+  reference         String?                   @db.VarChar(255)
+  failureReason     String?                   @map("failure_reason") @db.VarChar(255)
+  availableBalanceMinor BigInt?               @map("available_balance_minor") @db.BigInt
+  createdAt         DateTime                  @default(now()) @map("created_at")
+  updatedAt         DateTime                  @updatedAt @map("updated_at")
+  senderAccount     Account?                  @relation("senderAccount", fields: [senderAccountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  receiverAccount   Account                   @relation("receiverAccount", fields: [receiverAccountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  ledgerEntries     LedgerEntry[]
+  riskAssessment    RiskAssessment?
+  idempotencyKey    IdempotencyKey?
+  notifications     TransactionNotification[]
+  reversal          Reversal?                 @relation("OriginalTransfer")
+  reversalOf        Reversal?                 @relation("ReversalTransfer")
+  reviewDecisions   AdminDecision[]
+
+  @@index([senderAccountId])
+  @@index([receiverAccountId])
+  @@index([status, createdAt])
+  @@map("transfers")
+}
+
+model LedgerEntry {
+  id          String          @id @default(uuid()) @db.Uuid
+  transferId  String          @map("transfer_id") @db.Uuid
+  accountId   String          @map("account_id") @db.Uuid
+  entryType   LedgerEntryType @map("entry_type")
+  amountMinor BigInt          @map("amount_minor") @db.BigInt
+  currency    String          @db.Char(3)
+  createdAt   DateTime        @default(now()) @map("created_at")
+  transfer    Transfer        @relation(fields: [transferId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  account     Account         @relation(fields: [accountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([accountId, createdAt])
+  @@index([transferId])
+  @@map("ledger_entries")
+}
+
+model IdempotencyKey {
+  id             String    @id @default(uuid()) @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  accountId      String?   @map("account_id") @db.Uuid
+  transferId     String?   @unique @map("transfer_id") @db.Uuid
+  key            String    @db.VarChar(255)
+  requestHash    String    @map("request_hash") @db.VarChar(64)
+  responseStatus Int?      @map("response_status")
+  responseBody   Json?     @map("response_body")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  expiresAt      DateTime? @map("expires_at")
+  user           User      @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  account        Account?  @relation(fields: [accountId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  transfer       Transfer? @relation(fields: [transferId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([userId, key])
+  @@index([expiresAt])
+  @@map("idempotency_keys")
+}
+
+model RiskAssessment {
+  id         String       @id @default(uuid()) @db.Uuid
+  transferId String       @unique @map("transfer_id") @db.Uuid
+  score      Int
+  level      RiskLevel    @default(LOW)
+  reasons    Json
+  decision   RiskDecision @default(PENDING)
+  assessedAt DateTime     @default(now()) @map("assessed_at")
+  transfer   Transfer     @relation(fields: [transferId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([decision, assessedAt])
+  @@map("risk_assessments")
+}
+
+model ReconciliationRun {
+  id             String    @id @default(uuid()) @db.Uuid
+  startedAt      DateTime  @default(now()) @map("started_at")
+  completedAt    DateTime? @map("completed_at")
+  status         String    @db.VarChar(32)
+  recordsChecked Int       @default(0) @map("records_checked")
+  discrepancies  Json
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  @@index([status, startedAt])
+  @@map("reconciliation_runs")
+}
